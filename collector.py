@@ -22,8 +22,8 @@ supabase_key: str = os.getenv('SUPABASE_SERVICE_KEY')
 supabase = create_client(supabase_url, supabase_key)
 
 # Telegram configuration
-api_id = 27981616
-api_hash = 'f55aba83b15a8dbb9eaeee9debe92d6b'
+api_id = os.getenv('API_ID')
+api_hash = os.getenv('API_HASH')
 channel_username = 't.me/haregakaniti'
 output_dir = f'channel_images_{channel_username.split('/')[-1]}'
 output_file = f'channel_messages_{channel_username.split('/')[-1]}.json'
