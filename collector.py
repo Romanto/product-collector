@@ -150,7 +150,7 @@ async def download_image(message, message_id):
                 if f"{image_id}.jpg" in existing_filenames:
                     print(f"✅ Image {image_id} already exists in {bucket_name}")
                     public_url = supabase.storage.from_(bucket_name).get_public_url(destination_path)
-                    return public_url, image_id
+                    return public_url
             except Exception as e:
                 print(f"⚠️ Error checking bucket: {e}")
 
@@ -165,12 +165,12 @@ async def download_image(message, message_id):
             # Check for upload errors
             if hasattr(response, 'error') and response.error:
                 print(f"❌ Failed to upload image {image_id}: {response.error.message}")
-                return None, image_id
+                return
             
             # Get public URL
             public_url = supabase.storage.from_(bucket_name).get_public_url(destination_path)
             print(f"✅ Uploaded image {image_id} to {bucket_name}/{destination_path}")
-            return public_url, image_id
+            return public_url
     except Exception as e:
         print(f"❌ Error downloading/uploading image: {e}")
         return None, None
@@ -184,6 +184,22 @@ def insert_data(record: dict, table_name: str):
     except Exception as e:
         print(f"❌ Error inserting data to Supabase: {e}")
         return None
+    
+def price_extraction(text: str) -> str:
+    """
+    Extracts price from the text using regex.
+    Returns the first found price or None if not found.
+    """
+    pattern = r'\d+\s*ש"ח'
+    match = re.search(pattern, text)
+    if match:
+        price = match.group(0)
+        print(f"Extracted price: {price}")  # Output: Extracted price: 167 ש"ח
+        return price
+    else:
+        print("Price not found")
+        return '0 ש"ח'
+
 
 async def scrape_channel():
     messages_data = []
@@ -199,13 +215,14 @@ async def scrape_channel():
             for url in amazon_urls:
                 category, original_url = await get_amazon_category(url)
                 if category:
-                    categories.append({'url': original_url, 'category': category})
+                    url = original_url.split('?')[0]
+                    categories.append({'url': url, 'category': category})
                     break  # Use first valid category as per your script
                 # Random delay to avoid rate limiting (1-3 seconds)
                 await asyncio.sleep(random.uniform(1, 3))
             
             # Download image and get public URL and image ID
-            image_url, image_id = await download_image(message, message.id)
+            image_url = await download_image(message, message.id)
             
             # Only include messages with Amazon URLs
             if amazon_urls:
@@ -222,7 +239,7 @@ async def scrape_channel():
                     'views': message.views,
                     'origin_item_url': category_data['url'],
                     'bucket_image_url': image_url,
-                    'image_id': image_id,
+                    'price': price_extraction(message.text),
                     'category': category_data['category']
                 }
                 
