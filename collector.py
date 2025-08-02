@@ -3,16 +3,17 @@ import re
 import json
 import time
 import hashlib
-import aiohttp
+import asyncio
+import random
 from bs4 import BeautifulSoup
 from telethon.tl.types import MessageEntityUrl, MessageEntityTextUrl
 from telethon.sync import TelegramClient
-from supabase import create_client, Client
+from supabase import create_client
 from dotenv import load_dotenv
-import asyncio
 from datetime import datetime
+from aws_scrapper import main
 
-USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36'
+
 # Load environment variables
 load_dotenv()
 
@@ -35,15 +36,6 @@ if not os.path.exists(output_dir):
 # Create client
 client = TelegramClient('anon', api_id, api_hash)
 
-def clean_urls_from_text(text: str) -> str:
-    """
-    Removes all URLs from the given text using regex.
-    """
-    if not text:
-        return text
-    url_pattern = r'https?://[^\s]+'
-    return re.sub(url_pattern, '', text).strip()
-
 def regex_url_extractor(text: str, urls: list):
     """
     Extracts Amazon URLs from a given text using regex.
@@ -54,6 +46,15 @@ def regex_url_extractor(text: str, urls: list):
         if any(x for x in ['amazon', 'amzn'] if x in url.lower()):
             if url not in urls:  # Avoid duplicates
                 urls.append(url)
+
+def clean_urls_from_text(text: str) -> str:
+    """
+    Removes all URLs from the given text using regex.
+    """
+    if not text:
+        return text
+    url_pattern = r'https?://[^\s]+'
+    return re.sub(url_pattern, '', text).strip()
 
 def extract_urls(message):
     urls = []
@@ -78,37 +79,43 @@ def extract_urls(message):
 
 async def get_amazon_category(url: str) -> tuple:
     """
-    Fetches the Amazon product page and extracts the category using BeautifulSoup.
+    Fetches the Amazon product page using Playwright and extracts the category.
     Looks for <a class="a-link-normal a-color-tertiary">, potentially nested in <span class="a-list-item"> and <li>.
+    Returns (category, final_url).
     """
     try:
-        headers = {'User-Agent': USER_AGENT}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10, headers=headers) as response:
-                if response.status == 200:
-                    html = await response.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-                    # Look for the category in the specified <a> tag, including nested structures
-                    category_tag = soup.find('a', class_='a-link-normal a-color-tertiary')
-                    if category_tag:
-                        category = category_tag.get_text(strip=True)
-                        return category, str(response.real_url)
-                    else:
-                        # Fallback: check for nested structure explicitly
-                        span_tag = soup.find('span', class_='a-list-item')
-                        if span_tag:
-                            category_tag = span_tag.find('a', class_='a-link-normal a-color-tertiary')
-                            if category_tag:
-                                category = category_tag.get_text(strip=True)
-                                return category, str(response.real_url)
-                        print(f"⚠️ No category found for {url}")
-                        return None, None
-                else:
-                    print(f"❌ Failed to fetch URL {url}: Status {response.status}")
-                    return None
+        html, final_url = await main(url)
+        
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        # Try direct search for <a> tag
+        category_tag = soup.find('a', class_='a-link-normal a-color-tertiary')
+        if category_tag:
+            category = category_tag.get_text(strip=True)
+            if category:
+                return category, final_url
+        # Fallback: search within <li> and <span class="a-list-item">
+        li_tags = soup.find_all('li')
+        for li in li_tags:
+            span_tag = li.find('span', class_='a-list-item')
+            if span_tag:
+                category_tag = span_tag.find('a', class_='a-link-normal a-color-tertiary')
+                if category_tag:
+                    category = category_tag.get_text(strip=True)
+                    if category:
+                        return category, final_url
+            
+        # Fallback: search all <a> tags with a-color-tertiary
+        all_category_tags = soup.find_all('a', class_='a-link-normal a-color-tertiary')
+        for tag in all_category_tags:
+            category = tag.get_text(strip=True)
+            if category:
+                print(f"ℹ️ Found category in fallback search: {category} for {url}")
+                return category, final_url
+        return None, final_url
     except Exception as e:
         print(f"❌ Error fetching category for {url}: {e}")
-        return None
+        return None, final_url
 
 def get_image_hash(file_path):
     """
@@ -180,41 +187,43 @@ def insert_data(record: dict, table_name: str):
 
 async def scrape_channel():
     messages_data = []
-
     async with client:
-        async for message in client.iter_messages(channel_username, limit=100):
+        async for message in client.iter_messages(channel_username, limit=1000):
             # Extract Amazon URLs
             amazon_urls = extract_urls(message)
             if not amazon_urls:
                 continue
-            # Get category for each Amazon URL
+            
+            # Get category for each Amazon URL (use the first valid category found)
             categories = []
             for url in amazon_urls:
                 category, original_url = await get_amazon_category(url)
                 if category:
-                    categories = {'url': original_url, 'category': category}
-                    break
+                    categories.append({'url': original_url, 'category': category})
+                    break  # Use first valid category as per your script
+                # Random delay to avoid rate limiting (1-3 seconds)
+                await asyncio.sleep(random.uniform(1, 3))
             
             # Download image and get public URL and image ID
             image_url, image_id = await download_image(message, message.id)
             
             # Only include messages with Amazon URLs
             if amazon_urls:
-                # Get current timestamp
+                # Get current timestamp in ISO 8601 format
                 current_timestamp = datetime.utcfromtimestamp(int(time.time())).isoformat() + 'Z'
                 
-                if not categories:
-                    return
+                # Use the first category if available, else None
+                category_data = categories[0] if categories else {'url': amazon_urls[0], 'category': None}
                 
                 message_data = {
                     'id': message.id,
                     'created_at': current_timestamp,
                     'text': clean_urls_from_text(message.text),
                     'views': message.views,
-                    'origin_item_url': categories['url'],
+                    'origin_item_url': category_data['url'],
                     'bucket_image_url': image_url,
                     'image_id': image_id,
-                    'category': categories['category'] if categories else None,
+                    'category': category_data['category']
                 }
                 
                 # Insert into Supabase
